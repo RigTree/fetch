@@ -11,11 +11,10 @@ import Submit from "./pages/Submit";
 export default function App() {
   const { currentStep, profileData, setStep, setSession } = useStore();
 
+  // Always begin at the scanning step on app launch
   useEffect(() => {
-    if (profileData && currentStep === "scan") {
-      setStep("edit");
-    }
-  }, []);
+    setStep("scan");
+  }, [setStep]);
 
   useEffect(() => {
     const applyUrls = (urls) => {

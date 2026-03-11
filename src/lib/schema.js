@@ -91,6 +91,30 @@ export const STORAGE_FORM_FACTORS = ["M.2", "SATA", '2.5"', '3.5"'];
 export const PSU_EFFICIENCIES = ["", "80+", "Bronze", "Silver", "Gold", "Platinum", "Titanium"];
 export const DISPLAY_TYPES = ["AMOLED", "OLED", "LCD", "IPS", "Mini-LED", "Micro-LED"];
 
+function roundToCommercialCapacityGb(value) {
+  if (!value || value <= 0) return 0;
+  // Common commercial capacities in GB
+  const tiers = [
+    2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512,
+    1000, 2000, 4000, 8000
+  ];
+  let best = tiers[0];
+  let bestDiff = Math.abs(value - best);
+  for (const t of tiers) {
+    const diff = Math.abs(value - t);
+    if (diff < bestDiff) {
+      best = t;
+      bestDiff = diff;
+    }
+  }
+  return best;
+}
+
+function roundClockToNearestHundredMhz(value) {
+  if (!value || value <= 0) return 0;
+  return Math.round(value / 100) * 100;
+}
+
 export function hardwareToComputer(hw, existingId) {
   const comp = createDefaultComputer(existingId || "desktop-main");
   comp.name = hw.hostname || "";
@@ -103,7 +127,7 @@ export function hardwareToComputer(hw, existingId) {
     architecture: hw.cpu.architecture || "",
     cores: hw.cpu.cores || 0,
     threads: hw.cpu.threads || 0,
-    base_clock_mhz: hw.cpu.base_clock_mhz || 0,
+    base_clock_mhz: roundClockToNearestHundredMhz(hw.cpu.base_clock_mhz || 0),
   };
 
   comp.components.gpu = (hw.gpus || []).map((g) => ({
@@ -116,7 +140,7 @@ export function hardwareToComputer(hw, existingId) {
   if (ramModules.length > 0) {
     comp.components.ram = ramModules.map((m) => ({
       type: m.ram_type || "DDR4",
-      capacity_gb: Math.round(m.capacity_gb || 0),
+      capacity_gb: roundToCommercialCapacityGb(m.capacity_gb || 0),
       modules: 1,
       speed_mhz: m.speed_mhz || 0,
       manufacturer: m.manufacturer || "",
@@ -126,7 +150,7 @@ export function hardwareToComputer(hw, existingId) {
     comp.components.ram = [
       {
         type: "DDR4",
-        capacity_gb: Math.round(hw.ram_total_gb),
+        capacity_gb: roundToCommercialCapacityGb(hw.ram_total_gb),
         modules: 1,
         speed_mhz: 0,
         manufacturer: "",
@@ -146,7 +170,7 @@ export function hardwareToComputer(hw, existingId) {
     form_factor: "",
     brand: "",
     model: s.name || "",
-    capacity_gb: Math.round(s.capacity_gb),
+    capacity_gb: roundToCommercialCapacityGb(s.capacity_gb),
   }));
 
   comp.software.os_list = [{
