@@ -29,14 +29,16 @@ jobs:
             platform: macos
             artifact_name: macos-arm64
             bundles: dmg
+            target: aarch64-apple-darwin
             paths: |
-              src-tauri/target/release/bundle/dmg/*.dmg
-          - os: macos-13
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - os: macos-14
             platform: macos
             artifact_name: macos-x64
             bundles: dmg
+            target: x86_64-apple-darwin
             paths: |
-              src-tauri/target/release/bundle/dmg/*.dmg
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
 
     runs-on: ${{ matrix.os }}
 
@@ -52,6 +54,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS Rust target
+        if: matrix.platform == 'macos'
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
@@ -72,7 +78,12 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+        run: |
+          ARGS="--bundles ${{ matrix.bundles }}"
+          if [ -n "${{ matrix.target }}" ]; then
+            ARGS="$ARGS --target ${{ matrix.target }}"
+          fi
+          npm run tauri build -- $ARGS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -102,7 +113,9 @@ jobs:
               pacman -Syu --noconfirm --needed \
                 base-devel nodejs npm rust \
                 webkit2gtk libappindicator-gtk3 libayatana-appindicator libxdo openssl librsvg
-              makepkg -sf --noconfirm
+              useradd -m builder
+              chown -R builder:builder /src
+              su builder -c "cd /src && makepkg -sf --noconfirm"
             '
 
       - name: Upload Arch artifact
