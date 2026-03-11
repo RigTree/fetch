@@ -301,33 +301,6 @@ fn collect_gpus() -> Vec<GpuInfo> {
         }
     }
 
-    if let Ok(output) = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for (i, line) in text.lines().enumerate() {
-                let parts: Vec<&str> = line.split(", ").collect();
-                if parts.len() >= 2 {
-                    if let Ok(vram_mb) = parts[1].trim().parse::<f64>() {
-                        let vram_gb = (vram_mb / 1024.0).round();
-                        if let Some(gpu) = gpus
-                            .iter_mut()
-                            .filter(|g| g.brand == "NVIDIA")
-                            .nth(i)
-                        {
-                            gpu.vram_gb = vram_gb;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     if gpus.is_empty() {
         if let Ok(entries) = fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
@@ -342,10 +315,15 @@ fn collect_gpus() -> Vec<GpuInfo> {
                             "0x8086" => "Intel",
                             _ => "Unknown",
                         };
+                        let vram_gb = fs::read_to_string(base.join("mem_info_vram_total"))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u64>().ok())
+                            .map(|b| round2(b as f64 / 1_073_741_824.0))
+                            .unwrap_or(0.0);
                         gpus.push(GpuInfo {
                             brand: brand.to_string(),
                             model: String::new(),
-                            vram_gb: 0.0,
+                            vram_gb,
                         });
                     }
                 }
@@ -357,8 +335,19 @@ fn collect_gpus() -> Vec<GpuInfo> {
 }
 
 #[cfg(target_os = "windows")]
+fn run_powershell(script: &str) -> Option<String> {
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+#[cfg(target_os = "windows")]
 fn collect_gpus() -> Vec<GpuInfo> {
     let mut gpus = Vec::new();
+    let mut filled = false;
 
     if let Ok(output) = Command::new("wmic")
         .args([
@@ -370,6 +359,7 @@ fn collect_gpus() -> Vec<GpuInfo> {
         ])
         .output()
     {
+        if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout);
         let mut current_name = String::new();
         let mut current_vram: f64 = 0.0;
@@ -400,31 +390,32 @@ fn collect_gpus() -> Vec<GpuInfo> {
                 vram_gb: round2(current_vram / 1_073_741_824.0),
             });
         }
+        filled = !gpus.is_empty();
+        }
     }
 
-    if gpus.iter().any(|g| g.brand == "NVIDIA") {
-        if let Ok(output) = Command::new("nvidia-smi")
-            .args([
-                "--query-gpu=name,memory.total",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                for (i, line) in text.lines().enumerate() {
-                    let parts: Vec<&str> = line.split(", ").collect();
-                    if parts.len() >= 2 {
-                        if let Ok(vram_mb) = parts[1].trim().parse::<f64>() {
-                            if let Some(gpu) = gpus
-                                .iter_mut()
-                                .filter(|g| g.brand == "NVIDIA")
-                                .nth(i)
-                            {
-                                gpu.vram_gb = (vram_mb / 1024.0).round();
-                            }
-                        }
-                    }
+    if !filled {
+        if let Some(text) = run_powershell(
+            "Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $n=$_.Name; $r=if($_.AdapterRAM){$_.AdapterRAM}else{0}; \"$n|$r\" }",
+        ) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                if parts.len() >= 1 && !parts[0].is_empty() {
+                    let (brand, model) = parse_gpu_name(parts[0]);
+                    let vram_gb = parts
+                        .get(1)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|b| round2(b / 1_073_741_824.0))
+                        .unwrap_or(0.0);
+                    gpus.push(GpuInfo {
+                        brand,
+                        model,
+                        vram_gb,
+                    });
                 }
             }
         }
@@ -583,6 +574,7 @@ fn parse_dmidecode_ram(text: &str) -> Vec<RamModuleInfo> {
 #[cfg(target_os = "windows")]
 fn collect_ram_modules() -> Vec<RamModuleInfo> {
     let mut modules = Vec::new();
+    let mut filled = false;
 
     if let Ok(output) = Command::new("wmic")
         .args([
@@ -593,6 +585,7 @@ fn collect_ram_modules() -> Vec<RamModuleInfo> {
         ])
         .output()
     {
+        if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout);
         let mut cap: f64 = 0.0;
         let mut mfr = String::new();
@@ -643,6 +636,39 @@ fn collect_ram_modules() -> Vec<RamModuleInfo> {
                 manufacturer: mfr,
                 model: part,
             });
+        }
+        filled = !modules.is_empty();
+        }
+    }
+
+    if !filled {
+        if let Some(text) = run_powershell(
+            "Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | ForEach-Object { $c=$_.Capacity; $m=$_.Manufacturer; $p=$_.PartNumber; $s=$_.Speed; $t=$_.SMBIOSMemoryType; \"$c|$m|$p|$s|$t\" }",
+        ) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.splitn(5, '|').collect();
+                if parts.len() >= 1 {
+                    let cap: f64 = parts[0].parse().unwrap_or(0.0);
+                    if cap <= 0.0 {
+                        continue;
+                    }
+                    let mfr = parts.get(1).unwrap_or(&"").to_string();
+                    let part = parts.get(2).unwrap_or(&"").to_string();
+                    let speed: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let mem_type: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    modules.push(RamModuleInfo {
+                        ram_type: wmic_ram_type(mem_type),
+                        capacity_gb: round2(cap / 1_073_741_824.0),
+                        speed_mhz: speed,
+                        manufacturer: mfr,
+                        model: part,
+                    });
+                }
+            }
         }
     }
 
@@ -765,13 +791,32 @@ fn collect_motherboard() -> MotherboardInfo {
         .args(["baseboard", "get", "manufacturer,product", "/format:list"])
         .output()
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("Manufacturer=") {
-                brand = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("Product=") {
-                model = val.trim().to_string();
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("Manufacturer=") {
+                    brand = val.trim().to_string();
+                } else if let Some(val) = line.strip_prefix("Product=") {
+                    model = val.trim().to_string();
+                }
+            }
+        }
+    }
+
+    if brand.is_empty() && model.is_empty() {
+        if let Some(text) = run_powershell(
+            "Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { \"$($_.Manufacturer)|$($_.Product)\" }",
+        ) {
+            let line = text.lines().next().unwrap_or("").trim();
+            if !line.is_empty() {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                if parts.len() >= 1 {
+                    brand = parts[0].trim().to_string();
+                }
+                if parts.len() >= 2 {
+                    model = parts[1].trim().to_string();
+                }
             }
         }
     }
@@ -872,6 +917,7 @@ fn parse_xrandr(text: &str) -> Vec<MonitorInfo> {
 #[cfg(target_os = "windows")]
 fn collect_monitors() -> Vec<MonitorInfo> {
     let mut monitors = Vec::new();
+    let mut filled = false;
 
     if let Ok(output) = Command::new("wmic")
         .args([
@@ -883,50 +929,81 @@ fn collect_monitors() -> Vec<MonitorInfo> {
         ])
         .output()
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut name = String::new();
-        let mut w: u32 = 0;
-        let mut h: u32 = 0;
-        let mut rate: u32 = 0;
-        let mut has_data = false;
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut name = String::new();
+            let mut w: u32 = 0;
+            let mut h: u32 = 0;
+            let mut rate: u32 = 0;
+            let mut has_data = false;
 
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                if has_data && w > 0 && h > 0 {
-                    monitors.push(MonitorInfo {
-                        name: name.clone(),
-                        width: w,
-                        height: h,
-                        refresh_rate_hz: rate,
-                    });
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    if has_data && w > 0 && h > 0 {
+                        monitors.push(MonitorInfo {
+                            name: name.clone(),
+                            width: w,
+                            height: h,
+                            refresh_rate_hz: rate,
+                        });
+                    }
+                    name.clear();
+                    w = 0;
+                    h = 0;
+                    rate = 0;
+                    has_data = false;
+                    continue;
                 }
-                name.clear();
-                w = 0;
-                h = 0;
-                rate = 0;
-                has_data = false;
-                continue;
+                has_data = true;
+                if let Some(v) = line.strip_prefix("CurrentHorizontalResolution=") {
+                    w = v.trim().parse().unwrap_or(0);
+                } else if let Some(v) = line.strip_prefix("CurrentVerticalResolution=") {
+                    h = v.trim().parse().unwrap_or(0);
+                } else if let Some(v) = line.strip_prefix("CurrentRefreshRate=") {
+                    rate = v.trim().parse().unwrap_or(0);
+                } else if let Some(v) = line.strip_prefix("Name=") {
+                    name = v.trim().to_string();
+                }
             }
-            has_data = true;
-            if let Some(v) = line.strip_prefix("CurrentHorizontalResolution=") {
-                w = v.trim().parse().unwrap_or(0);
-            } else if let Some(v) = line.strip_prefix("CurrentVerticalResolution=") {
-                h = v.trim().parse().unwrap_or(0);
-            } else if let Some(v) = line.strip_prefix("CurrentRefreshRate=") {
-                rate = v.trim().parse().unwrap_or(0);
-            } else if let Some(v) = line.strip_prefix("Name=") {
-                name = v.trim().to_string();
-            }
-        }
 
-        if has_data && w > 0 && h > 0 {
-            monitors.push(MonitorInfo {
-                name,
-                width: w,
-                height: h,
-                refresh_rate_hz: rate,
-            });
+            if has_data && w > 0 && h > 0 {
+                monitors.push(MonitorInfo {
+                    name,
+                    width: w,
+                    height: h,
+                    refresh_rate_hz: rate,
+                });
+            }
+            filled = !monitors.is_empty();
+        }
+    }
+
+    if !filled {
+        if let Some(text) = run_powershell(
+            "Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $n=$_.Name; $w=$_.CurrentHorizontalResolution; $h=$_.CurrentVerticalResolution; $r=$_.CurrentRefreshRate; \"$n|$w|$h|$r\" }",
+        ) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                if parts.len() >= 4 {
+                    let w: u32 = parts[1].parse().unwrap_or(0);
+                    let h: u32 = parts[2].parse().unwrap_or(0);
+                    if w > 0 && h > 0 {
+                        let name = parts[0].to_string();
+                        let rate: u32 = parts[3].parse().unwrap_or(60);
+                        monitors.push(MonitorInfo {
+                            name,
+                            width: w,
+                            height: h,
+                            refresh_rate_hz: rate,
+                        });
+                    }
+                }
+            }
         }
     }
 
