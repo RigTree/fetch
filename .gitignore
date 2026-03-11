@@ -7,10 +7,6 @@ dist/
 # Tauri build output
 src-tauri/target/
 
-# Arch Linux makepkg
-*.pkg.tar.zst
-src/
-
 # Vite
 *.local
 
